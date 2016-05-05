@@ -14,7 +14,7 @@ public class LoggerFactory
                     {
                         if (isLog4jAvailable())
                             impl = new Log4jLoggerFactory();
-                        if (isSlf4jAvailable())
+                        else if (isSlf4jAvailable())
                             impl = new SLF4JLoggerFactory();
                         else
                             impl = new ConsoleLoggerFactory();
