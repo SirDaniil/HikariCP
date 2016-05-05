@@ -19,9 +19,7 @@ package com.zaxxer.hikari.pool;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.zaxxer.hikari.*;
 
 /**
  * A Runnable that is scheduled in the future to report leaks.  The ScheduledFuture is

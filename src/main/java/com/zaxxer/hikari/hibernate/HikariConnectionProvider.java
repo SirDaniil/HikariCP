@@ -20,17 +20,13 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Map;
 
+import com.zaxxer.hikari.*;
 import org.hibernate.HibernateException;
 import org.hibernate.Version;
 import org.hibernate.engine.jdbc.connections.spi.ConnectionProvider;
 import org.hibernate.service.UnknownUnwrapTypeException;
 import org.hibernate.service.spi.Configurable;
 import org.hibernate.service.spi.Stoppable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
 
 import javax.sql.DataSource;
 

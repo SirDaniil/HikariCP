@@ -170,6 +170,13 @@ public interface HikariConfigMXBean
     */
    void setUsername(String username);
 
+    /**
+     * Sets logger factory implementation
+     *
+     * @param factory implementation for the factory
+     */
+   void setLoggerFactory(Loggable factory);
+
   
    /**
     * The name of the connection pool.

@@ -25,10 +25,7 @@ import javax.management.MBeanServer;
 import javax.management.ObjectName;
 import javax.sql.DataSource;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.*;
 import com.zaxxer.hikari.metrics.MetricsTracker;
 import com.zaxxer.hikari.util.ClockSource;
 import com.zaxxer.hikari.util.DriverDataSource;

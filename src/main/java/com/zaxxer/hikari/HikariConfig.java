@@ -32,9 +32,6 @@ import javax.naming.InitialContext;
 import javax.naming.NamingException;
 import javax.sql.DataSource;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.health.HealthCheckRegistry;
 import com.zaxxer.hikari.metrics.MetricsTrackerFactory;
@@ -249,6 +246,11 @@ public class HikariConfig implements HikariConfigMXBean
 
       this.validationTimeout = validationTimeoutMs;
    }
+
+    public void setLoggerFactory(Loggable factory)
+        {
+            LoggerFactory.impl = factory;
+        }
 
    /**
     * Get the {@link DataSource} that has been explicitly specified to be wrapped by the
