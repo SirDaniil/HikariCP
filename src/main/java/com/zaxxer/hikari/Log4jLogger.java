@@ -54,7 +54,7 @@ public class Log4jLogger implements Logger
 
         private void log(Level level, String s, Object... objects)
             {
-                if (objects == null)
+                if (objects == null || objects.length == 0)
                     {
                         switch (level)
                             {
