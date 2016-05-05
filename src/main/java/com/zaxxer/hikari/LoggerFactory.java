@@ -6,10 +6,13 @@ package com.zaxxer.hikari;
  */
 public class LoggerFactory
     {
-        public static Loggable impl = new SLF4JLoggerFactory();
+        public static Loggable impl = null;
 
-        public static Logger getLogger(Class clazz)
+        public static synchronized Logger getLogger(Class clazz)
             {
+                if (impl == null)
+                    impl = new SLF4JLoggerFactory();
+
                 return impl.getLogger(clazz);
             }
     }
