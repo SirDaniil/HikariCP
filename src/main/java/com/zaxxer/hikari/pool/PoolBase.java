@@ -37,11 +37,9 @@ import javax.naming.InitialContext;
 import javax.naming.NamingException;
 import javax.sql.DataSource;
 
+import com.zaxxer.hikari.*;
 import com.zaxxer.hikari.pool.HikariPool.PoolInitializationException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.metrics.IMetricsTracker;
 import com.zaxxer.hikari.util.DriverDataSource;
 import com.zaxxer.hikari.util.PropertyElf;

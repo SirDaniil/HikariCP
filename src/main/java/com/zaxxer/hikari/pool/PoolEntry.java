@@ -15,10 +15,9 @@
  */
 package com.zaxxer.hikari.pool;
 
+import com.zaxxer.hikari.*;
 import com.zaxxer.hikari.util.ConcurrentBag.IConcurrentBagEntry;
 import com.zaxxer.hikari.util.FastList;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.SQLException;
