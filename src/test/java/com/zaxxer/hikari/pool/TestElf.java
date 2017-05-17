@@ -19,7 +19,6 @@ package com.zaxxer.hikari.pool;
 import java.io.PrintStream;
 import java.lang.reflect.Field;
 import java.sql.Connection;
-import java.util.HashMap;
 
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.Appender;
@@ -32,6 +31,7 @@ import org.slf4j.LoggerFactory;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import com.zaxxer.hikari.util.ConcurrentBag;
 
 /**
  * Utility methods for testing.
@@ -42,6 +42,10 @@ public final class TestElf
 {
    private TestElf() {
       // default constructor
+   }
+
+   public static boolean isJava9() {
+      return System.getProperty("java.version").startsWith("9");
    }
 
    public static HikariPool getPool(HikariDataSource ds)
@@ -56,20 +60,19 @@ public final class TestElf
       }
    }
 
-   @SuppressWarnings("unchecked")
-   public static HashMap<Object, HikariPool> getMultiPool(HikariDataSource ds)
+   static ConcurrentBag<?> getConcurrentBag(HikariDataSource ds)
    {
       try {
-         Field field = ds.getClass().getDeclaredField("multiPool");
+         Field field = HikariPool.class.getDeclaredField("connectionBag");
          field.setAccessible(true);
-         return (HashMap<Object, HikariPool>) field.get(ds);
+         return (ConcurrentBag<?>) field.get(getPool(ds));
       }
       catch (Exception e) {
          throw new RuntimeException(e);
       }
    }
 
-   public static boolean getConnectionCommitDirtyState(Connection connection)
+   static boolean getConnectionCommitDirtyState(Connection connection)
    {
       try {
          Field field = ProxyConnection.class.getDeclaredField("isCommitStateDirty");
@@ -81,7 +84,7 @@ public final class TestElf
       }
    }
 
-   public static void setConfigUnitTest(boolean unitTest)
+   static void setConfigUnitTest(boolean unitTest)
    {
       try {
          Field field = HikariConfig.class.getDeclaredField("unitTest");
@@ -93,7 +96,7 @@ public final class TestElf
       }
    }
 
-   public static void setSlf4jTargetStream(Class<?> clazz, PrintStream stream)
+   static void setSlf4jTargetStream(Class<?> clazz, PrintStream stream)
    {
       try {
          Log4jLogger log4Jlogger = (Log4jLogger) LoggerFactory.getLogger(clazz);
@@ -114,7 +117,7 @@ public final class TestElf
       }
    }
 
-   public static void setSlf4jLogLevel(Class<?> clazz, Level logLevel)
+   static void setSlf4jLogLevel(Class<?> clazz, Level logLevel)
    {
       try {
          Log4jLogger log4Jlogger = (Log4jLogger) LoggerFactory.getLogger(clazz);
@@ -130,9 +133,36 @@ public final class TestElf
       }
    }
 
+   public static HikariConfig newHikariConfig()
+   {
+      final StackTraceElement callerStackTrace = Thread.currentThread().getStackTrace()[2];
+
+      String poolName = callerStackTrace.getMethodName();
+      if ("setup".equals(poolName)) {
+         poolName = callerStackTrace.getClassName();
+      }
+
+      final HikariConfig config = new HikariConfig();
+      config.setPoolName(poolName);
+      return config;
+   }
+
+   static HikariDataSource newHikariDataSource()
+   {
+      final StackTraceElement callerStackTrace = Thread.currentThread().getStackTrace()[2];
+
+      String poolName = callerStackTrace.getMethodName();
+      if ("setup".equals(poolName)) {
+         poolName = callerStackTrace.getClassName();
+      }
+
+      final HikariDataSource ds = new HikariDataSource();
+      ds.setPoolName(poolName);
+      return ds;
+   }
+
    private static class StringAppender extends AbstractAppender
    {
-      private static final long serialVersionUID = -1932433845656444920L;
       private PrintStream stream;
 
       StringAppender(String name, PrintStream stream)

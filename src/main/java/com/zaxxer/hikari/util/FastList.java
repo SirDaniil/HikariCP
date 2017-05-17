@@ -16,14 +16,15 @@
 
 package com.zaxxer.hikari.util;
 
+import java.io.Serializable;
 import java.lang.reflect.Array;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.NoSuchElementException;
+import java.util.RandomAccess;
 import java.util.Spliterator;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -34,7 +35,7 @@ import java.util.function.UnaryOperator;
  *
  * @author Brett Wooldridge
  */
-public final class FastList<T> extends ArrayList<T>
+public final class FastList<T> implements List<T>, RandomAccess, Serializable
 {
    private static final long serialVersionUID = -4598088075242913858L;
 
@@ -73,17 +74,17 @@ public final class FastList<T> extends ArrayList<T>
    @Override
    public boolean add(T element)
    {
-      try {
+      if (size < elementData.length) {
          elementData[size++] = element;
       }
-      catch (ArrayIndexOutOfBoundsException e) {
+      else {
          // overflow-conscious code
          final int oldCapacity = elementData.length;
          final int newCapacity = oldCapacity << 1;
          @SuppressWarnings("unchecked")
          final T[] newElementData = (T[]) Array.newInstance(clazz, newCapacity);
          System.arraycopy(elementData, 0, newElementData, 0, oldCapacity);
-         newElementData[size - 1] = element;
+         newElementData[size++] = element;
          elementData = newElementData;
       }
 
@@ -325,20 +326,6 @@ public final class FastList<T> extends ArrayList<T>
 
    /** {@inheritDoc} */
    @Override
-   public void trimToSize()
-   {
-      throw new UnsupportedOperationException();
-   }
-
-   /** {@inheritDoc} */
-   @Override
-   public void ensureCapacity(int minCapacity)
-   {
-      throw new UnsupportedOperationException();
-   }
-
-   /** {@inheritDoc} */
-   @Override
    public Object clone()
    {
       throw new UnsupportedOperationException();
@@ -346,36 +333,34 @@ public final class FastList<T> extends ArrayList<T>
 
    /** {@inheritDoc} */
    @Override
-   protected void removeRange(int fromIndex, int toIndex)
-   {
-      throw new UnsupportedOperationException();
-   }
-
-   /** {@inheritDoc} */
    public void forEach(Consumer<? super T> action)
    {
       throw new UnsupportedOperationException();
    }
 
    /** {@inheritDoc} */
+   @Override
    public Spliterator<T> spliterator()
    {
       throw new UnsupportedOperationException();
    }
 
    /** {@inheritDoc} */
+   @Override
    public boolean removeIf(Predicate<? super T> filter)
    {
       throw new UnsupportedOperationException();
    }
 
    /** {@inheritDoc} */
+   @Override
    public void replaceAll(UnaryOperator<T> operator)
    {
       throw new UnsupportedOperationException();
    }
 
    /** {@inheritDoc} */
+   @Override
    public void sort(Comparator<? super T> c)
    {
       throw new UnsupportedOperationException();

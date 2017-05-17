@@ -27,6 +27,7 @@ import javax.sql.DataSource;
 
 import com.zaxxer.hikari.metrics.MetricsTrackerFactory;
 import com.zaxxer.hikari.pool.HikariPool;
+import com.zaxxer.hikari.pool.HikariPool.PoolInitializationException;
 
 /**
  * The HikariCP pooled DataSource.
@@ -64,8 +65,9 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
       configuration.validate();
       configuration.copyState(this);
 
-      LOGGER.info("{} - Started.", configuration.getPoolName());
+      LOGGER.info("{} - Starting...", configuration.getPoolName());
       pool = fastPathPool = new HikariPool(this);
+      LOGGER.info("{} - Start completed.", configuration.getPoolName());
    }
 
    /** {@inheritDoc} */
@@ -87,8 +89,19 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
             result = pool;
             if (result == null) {
                validate();
-               LOGGER.info("{} - Started.", getPoolName());
-               pool = result = new HikariPool(this);
+               LOGGER.info("{} - Starting...", getPoolName());
+               try {
+                  pool = result = new HikariPool(this);
+               }
+               catch (PoolInitializationException pie) {
+                  if (pie.getCause() instanceof SQLException) {
+                     throw (SQLException) pie.getCause();
+                  }
+                  else {
+                     throw pie;
+                  }
+               }
+               LOGGER.info("{} - Start completed.", getPoolName());
             }
          }
       }
@@ -248,6 +261,28 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
    }
 
    /**
+    * Get the {@code HikariPoolMXBean} for this HikariDataSource instance.  If this method is called on
+    * a {@code HikariDataSource} that has been constructed without a {@code HikariConfig} instance,
+    * and before an initial call to {@code #getConnection()}, the return value will be {@code null}.
+    *
+    * @return the {@code HikariPoolMXBean} instance, or {@code null}.
+    */
+   public HikariPoolMXBean getHikariPoolMXBean()
+   {
+      return pool;
+   }
+
+   /**
+    * Get the {@code HikariConfigMXBean} for this HikariDataSource instance.
+    * 
+    * @return the {@code HikariConfigMXBean} instance.
+    */
+   public HikariConfigMXBean getHikariConfigMXBean()
+   {
+      return this;
+   }
+
+   /**
     * Evict a connection from the pool.  If the connection has already been closed (returned to the pool)
     * this may result in a "soft" eviction; the connection will be evicted sometime in the future if it is
     * currently in use.  If the connection has not been closed, the eviction is immediate.
@@ -265,7 +300,11 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
    /**
     * Suspend allocation of connections from the pool.  All callers to <code>getConnection()</code>
     * will block indefinitely until <code>resumePool()</code> is called.
+    *
+    * @deprecated Call the {@code HikariPoolMXBean#suspendPool()} method on the {@code HikariPoolMXBean}
+    *             obtained by {@code #getHikariPoolMXBean()} or JMX lookup.
     */
+   @Deprecated
    public void suspendPool()
    {
       HikariPool p;
@@ -276,7 +315,11 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
 
    /**
     * Resume allocation of connections from the pool.
+    *
+    * @deprecated Call the {@code HikariPoolMXBean#resumePool()} method on the {@code HikariPoolMXBean}
+    *             obtained by {@code #getHikariPoolMXBean()} or JMX lookup.
     */
+   @Deprecated
    public void resumePool()
    {
       HikariPool p;
@@ -298,10 +341,12 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
       HikariPool p = pool;
       if (p != null) {
          try {
+            LOGGER.info("{} - Shutdown initiated...", getPoolName());
             p.shutdown();
+            LOGGER.info("{} - Shutdown completed.", getPoolName());
          }
          catch (InterruptedException e) {
-            LOGGER.warn("Interrupted during closing", e);
+            LOGGER.warn("{} - Interrupted during closing", getPoolName(), e);
             Thread.currentThread().interrupt();
          }
       }

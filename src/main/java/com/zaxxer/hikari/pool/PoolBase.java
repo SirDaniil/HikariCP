@@ -1,11 +1,21 @@
+/*
+ * Copyright (C) 2013, 2014 Brett Wooldridge
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+*/
+
 package com.zaxxer.hikari.pool;
 
-import static com.zaxxer.hikari.pool.ProxyConnection.DIRTY_BIT_AUTOCOMMIT;
-import static com.zaxxer.hikari.pool.ProxyConnection.DIRTY_BIT_CATALOG;
-import static com.zaxxer.hikari.pool.ProxyConnection.DIRTY_BIT_ISOLATION;
-import static com.zaxxer.hikari.pool.ProxyConnection.DIRTY_BIT_NETTIMEOUT;
-import static com.zaxxer.hikari.pool.ProxyConnection.DIRTY_BIT_READONLY;
-import static com.zaxxer.hikari.util.UtilityElf.createInstance;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -23,15 +33,30 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
+import javax.naming.InitialContext;
+import javax.naming.NamingException;
 import javax.sql.DataSource;
 
-import com.zaxxer.hikari.*;
-import com.zaxxer.hikari.metrics.MetricsTracker;
-import com.zaxxer.hikari.util.ClockSource;
+import com.zaxxer.hikari.pool.HikariPool.PoolInitializationException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.metrics.IMetricsTracker;
 import com.zaxxer.hikari.util.DriverDataSource;
 import com.zaxxer.hikari.util.PropertyElf;
 import com.zaxxer.hikari.util.UtilityElf;
 import com.zaxxer.hikari.util.UtilityElf.DefaultThreadFactory;
+
+import static com.zaxxer.hikari.pool.ProxyConnection.DIRTY_BIT_AUTOCOMMIT;
+import static com.zaxxer.hikari.pool.ProxyConnection.DIRTY_BIT_CATALOG;
+import static com.zaxxer.hikari.pool.ProxyConnection.DIRTY_BIT_ISOLATION;
+import static com.zaxxer.hikari.pool.ProxyConnection.DIRTY_BIT_NETTIMEOUT;
+import static com.zaxxer.hikari.pool.ProxyConnection.DIRTY_BIT_READONLY;
+import static com.zaxxer.hikari.util.ClockSource.currentTime;
+import static com.zaxxer.hikari.util.ClockSource.elapsedMillis;
+import static com.zaxxer.hikari.util.ClockSource.elapsedNanos;
+import static com.zaxxer.hikari.util.UtilityElf.createInstance;
 
 abstract class PoolBase
 {
@@ -39,8 +64,9 @@ abstract class PoolBase
 
    protected final HikariConfig config;
    protected final String poolName;
-   protected long connectionTimeout;
-   protected long validationTimeout;
+   long connectionTimeout;
+   long validationTimeout;
+   IMetricsTrackerDelegate metricsTracker;
 
    private static final String[] RESET_STATES = {"readOnly", "autoCommit", "isolation", "catalog", "netTimeout"};
    private static final int UNINITIALIZED = -1;
@@ -95,7 +121,7 @@ abstract class PoolBase
       return poolName;
    }
 
-   abstract void releaseConnection(final PoolEntry poolEntry);
+   abstract void recycle(final PoolEntry poolEntry);
 
    // ***********************************************************************
    //                           JDBC methods
@@ -122,29 +148,34 @@ abstract class PoolBase
    boolean isConnectionAlive(final Connection connection)
    {
       try {
-         if (isUseJdbc4Validation) {
-            return connection.isValid((int) MILLISECONDS.toSeconds(Math.max(1000L, validationTimeout)));
-         }
+         try {
+            setNetworkTimeout(connection, validationTimeout);
 
-         setNetworkTimeout(connection, validationTimeout);
+            final long validationSeconds = (int) Math.max(1000L, validationTimeout) / 1000;
 
-         try (Statement statement = connection.createStatement()) {
-            if (isNetworkTimeoutSupported != TRUE) {
-               setQueryTimeout(statement, (int) MILLISECONDS.toSeconds(Math.max(1000L, validationTimeout)));
+            if (isUseJdbc4Validation) {
+               return connection.isValid((int) validationSeconds);
             }
 
-            statement.execute(config.getConnectionTestQuery());
-         }
+            try (Statement statement = connection.createStatement()) {
+               if (isNetworkTimeoutSupported != TRUE) {
+                  setQueryTimeout(statement, (int) validationSeconds);
+               }
 
-         if (isIsolateInternalQueries && !isReadOnly && !isAutoCommit) {
-            connection.rollback();
+               statement.execute(config.getConnectionTestQuery());
+            }
          }
+         finally {
+            setNetworkTimeout(connection, networkTimeout);
 
-         setNetworkTimeout(connection, networkTimeout);
+            if (isIsolateInternalQueries && !isAutoCommit) {
+               connection.rollback();
+            }
+         }
 
          return true;
       }
-      catch (SQLException e) {
+      catch (Exception e) {
          lastConnectionFailure.set(e);
          LOGGER.warn("{} - Failed to validate connection {} ({})", poolName, connection, e.getMessage());
          return false;
@@ -153,7 +184,7 @@ abstract class PoolBase
 
    Throwable getLastConnectionFailure()
    {
-      return lastConnectionFailure.getAndSet(null);
+      return lastConnectionFailure.get();
    }
 
    public DataSource getUnwrappedDataSource()
@@ -218,7 +249,7 @@ abstract class PoolBase
    /**
     * Register MBeans for HikariConfig and HikariPool.
     *
-    * @param pool a HikariPool instance
+    * @param hikariPool a HikariPool instance
     */
    void registerMBeans(final HikariPool hikariPool)
    {
@@ -236,7 +267,7 @@ abstract class PoolBase
             mBeanServer.registerMBean(hikariPool, beanPoolName);
          }
          else {
-            LOGGER.error("{} - You cannot use the same pool name for separate pool instances.", poolName);
+            LOGGER.error("{} - JMX name ({}) is already registered.", poolName, poolName);
          }
       }
       catch (Exception e) {
@@ -274,8 +305,6 @@ abstract class PoolBase
 
    /**
     * Create/initialize the underlying DataSource.
-    *
-    * @return a DataSource instance
     */
    private void initializeDataSource()
    {
@@ -284,6 +313,7 @@ abstract class PoolBase
       final String password = config.getPassword();
       final String dsClassName = config.getDataSourceClassName();
       final String driverClassName = config.getDriverClassName();
+      final String dataSourceJNDI = config.getDataSourceJNDI();
       final Properties dataSourceProperties = config.getDataSourceProperties();
 
       DataSource dataSource = config.getDataSource();
@@ -294,17 +324,32 @@ abstract class PoolBase
       else if (jdbcUrl != null && dataSource == null) {
          dataSource = new DriverDataSource(jdbcUrl, driverClassName, dataSourceProperties, username, password);
       }
+      else if (dataSourceJNDI != null && dataSource == null) {
+         try {
+            InitialContext ic = new InitialContext();
+            dataSource = (DataSource) ic.lookup(dataSourceJNDI);
+         } catch (NamingException e) {
+            throw new PoolInitializationException(e);
+         }
+      }
 
       if (dataSource != null) {
-         setLoginTimeout(dataSource, connectionTimeout);
+         setLoginTimeout(dataSource);
          createNetworkTimeoutExecutor(dataSource, dsClassName, jdbcUrl);
       }
 
       this.dataSource = dataSource;
    }
 
-   Connection newConnection() throws Exception
+   /**
+    * Obtain connection from data source.
+    *
+    * @return a Connection connection
+    */
+   private Connection newConnection() throws Exception
    {
+      final long start = currentTime();
+
       Connection connection = null;
       try {
          String username = config.getUsername();
@@ -320,9 +365,21 @@ abstract class PoolBase
          return connection;
       }
       catch (Exception e) {
+         if (connection != null) {
+            quietlyCloseConnection(connection, "(Failed to create/setup connection)");
+         }
+         else if (getLastConnectionFailure() == null) {
+            LOGGER.debug("{} - Failed to create/setup connection: {}", poolName, e.getMessage());
+         }
+
          lastConnectionFailure.set(e);
-         quietlyCloseConnection(connection, "(Failed to create/set connection)");
          throw e;
+      }
+      finally {
+         // tracker will be null during failFast check
+         if (metricsTracker != null) {
+            metricsTracker.recordConnectionCreated(elapsedMillis(start));
+         }
       }
    }
 
@@ -330,33 +387,38 @@ abstract class PoolBase
     * Setup a connection initial state.
     *
     * @param connection a Connection
-    * @throws SQLException thrown from driver
+    * @throws ConnectionSetupException thrown if any exception is encountered
     */
-   private void setupConnection(final Connection connection) throws SQLException
+   private void setupConnection(final Connection connection) throws ConnectionSetupException
    {
-      if (networkTimeout == UNINITIALIZED) {
-         networkTimeout = getAndSetNetworkTimeout(connection, validationTimeout);
+      try {
+         if (networkTimeout == UNINITIALIZED) {
+            networkTimeout = getAndSetNetworkTimeout(connection, validationTimeout);
+         }
+         else {
+            setNetworkTimeout(connection, validationTimeout);
+         }
+
+         connection.setReadOnly(isReadOnly);
+         connection.setAutoCommit(isAutoCommit);
+
+         checkDriverSupport(connection);
+
+         if (transactionIsolation != defaultTransactionIsolation) {
+            connection.setTransactionIsolation(transactionIsolation);
+         }
+
+         if (catalog != null) {
+            connection.setCatalog(catalog);
+         }
+
+         executeSql(connection, config.getConnectionInitSql(), true);
+
+         setNetworkTimeout(connection, networkTimeout);
       }
-      else {
-         setNetworkTimeout(connection, validationTimeout);
+      catch (SQLException e) {
+         throw new ConnectionSetupException(e);
       }
-
-      checkDriverSupport(connection);
-
-      connection.setReadOnly(isReadOnly);
-      connection.setAutoCommit(isAutoCommit);
-
-      if (transactionIsolation != defaultTransactionIsolation) {
-         connection.setTransactionIsolation(transactionIsolation);
-      }
-
-      if (catalog != null) {
-         connection.setCatalog(catalog);
-      }
-
-      executeSql(connection, config.getConnectionInitSql(), true);
-
-      setNetworkTimeout(connection, networkTimeout);
    }
 
    /**
@@ -367,28 +429,30 @@ abstract class PoolBase
    private void checkDriverSupport(final Connection connection) throws SQLException
    {
       if (!isValidChecked) {
-         if (isUseJdbc4Validation) {
-            try {
+         try {
+            if (isUseJdbc4Validation) {
                connection.isValid(1);
             }
-            catch (Throwable e) {
-               LOGGER.error("{} - Failed to execute isValid() for connection, configure connection test query. ({})", poolName, e.getMessage());
-               throw e;
-            }
-         }
-         else {
-            try {
+            else {
                executeSql(connection, config.getConnectionTestQuery(), false);
             }
-            catch (Throwable e) {
-               LOGGER.error("{} - Failed to execute connection test query. ({})", poolName, e.getMessage());
-               throw e;
-            }
+         }
+         catch (Throwable e) {
+            LOGGER.error("{} - Failed to execute" + (isUseJdbc4Validation ? " isValid() for connection, configure" : "") + " connection test query ({}).", poolName, e.getMessage());
+            throw e;
          }
 
-         defaultTransactionIsolation = connection.getTransactionIsolation();
-         if (transactionIsolation == -1) {
-            transactionIsolation = defaultTransactionIsolation;
+         try {
+            defaultTransactionIsolation = connection.getTransactionIsolation();
+            if (transactionIsolation == -1) {
+               transactionIsolation = defaultTransactionIsolation;
+            }
+         }
+         catch (SQLException e) {
+            LOGGER.warn("{} - Default transaction isolation level detection failed ({}).", poolName, e.getMessage());
+            if (e.getSQLState() != null && !e.getSQLState().startsWith("08")) {
+               throw e;
+            }
          }
 
          isValidChecked = true;
@@ -411,7 +475,7 @@ abstract class PoolBase
          catch (Throwable e) {
             if (isQueryTimeoutSupported == UNINITIALIZED) {
                isQueryTimeoutSupported = FALSE;
-               LOGGER.warn("{} - Failed to set query timeout for statement. ({})", poolName, e.getMessage());
+               LOGGER.info("{} - Failed to set query timeout for statement. ({})", poolName, e.getMessage());
             }
          }
       }
@@ -483,7 +547,7 @@ abstract class PoolBase
             statement.execute(sql);
          }
 
-         if (isIsolateInternalQueries && !isReadOnly && !isAutoCommit) {
+         if (isIsolateInternalQueries && !isAutoCommit) {
             if (isCommit) {
                connection.commit();
             }
@@ -516,16 +580,15 @@ abstract class PoolBase
     * Set the loginTimeout on the specified DataSource.
     *
     * @param dataSource the DataSource
-    * @param connectionTimeout the timeout in milliseconds
     */
-   private void setLoginTimeout(final DataSource dataSource, final long connectionTimeout)
+   private void setLoginTimeout(final DataSource dataSource)
    {
       if (connectionTimeout != Integer.MAX_VALUE) {
          try {
-            dataSource.setLoginTimeout((int) MILLISECONDS.toSeconds(Math.max(1000L, connectionTimeout)));
+            dataSource.setLoginTimeout(Math.max(1, (int) MILLISECONDS.toSeconds(500L + connectionTimeout)));
          }
          catch (Throwable e) {
-            LOGGER.warn("{} - Failed to set login timeout for data source. ({})", poolName, e.getMessage());
+            LOGGER.info("{} - Failed to set login timeout for data source. ({})", poolName, e.getMessage());
          }
       }
    }
@@ -557,6 +620,16 @@ abstract class PoolBase
    //                      Private Static Classes
    // ***********************************************************************
 
+   static class ConnectionSetupException extends Exception
+   {
+      private static final long serialVersionUID = 929872118275916521L;
+
+      ConnectionSetupException(Throwable t)
+      {
+         super(t);
+      }
+   }
+
    /**
     * Special executor used only to work around a MySQL issue that has not been addressed.
     * MySQL issue: http://bugs.mysql.com/bug.php?id=75615
@@ -576,23 +649,65 @@ abstract class PoolBase
       }
    }
 
+   interface IMetricsTrackerDelegate extends AutoCloseable
+   {
+      default void recordConnectionUsage(PoolEntry poolEntry) {}
+
+      default void recordConnectionCreated(long connectionCreatedMillis) {}
+
+      default void recordBorrowTimeoutStats(long startTime) {}
+
+      default void recordBorrowStats(final PoolEntry poolEntry, final long startTime) {}
+
+      default void recordConnectionTimeout() {}
+
+      @Override
+      default void close() {}
+   }
+
    /**
     * A class that delegates to a MetricsTracker implementation.  The use of a delegate
     * allows us to use the NopMetricsTrackerDelegate when metrics are disabled, which in
     * turn allows the JIT to completely optimize away to callsites to record metrics.
     */
-   static class MetricsTrackerDelegate implements AutoCloseable
+   static class MetricsTrackerDelegate implements IMetricsTrackerDelegate
    {
-      final MetricsTracker tracker;
+      final IMetricsTracker tracker;
 
-      protected MetricsTrackerDelegate()
-      {
-         this.tracker = null;
-      }
-
-      MetricsTrackerDelegate(MetricsTracker tracker)
+      MetricsTrackerDelegate(IMetricsTracker tracker)
       {
          this.tracker = tracker;
+      }
+
+      @Override
+      public void recordConnectionUsage(final PoolEntry poolEntry)
+      {
+         tracker.recordConnectionUsageMillis(poolEntry.getMillisSinceBorrowed());
+      }
+
+      @Override
+      public void recordConnectionCreated(long connectionCreatedMillis)
+      {
+         tracker.recordConnectionCreatedMillis(connectionCreatedMillis);
+      }
+
+      @Override
+      public void recordBorrowTimeoutStats(long startTime)
+      {
+         tracker.recordConnectionAcquiredNanos(elapsedNanos(startTime));
+      }
+
+      @Override
+      public void recordBorrowStats(final PoolEntry poolEntry, final long startTime)
+      {
+         final long now = currentTime();
+         poolEntry.lastBorrowed = now;
+         tracker.recordConnectionAcquiredNanos(elapsedNanos(startTime, now));
+      }
+
+      @Override
+      public void recordConnectionTimeout() {
+         tracker.recordConnectionTimeout();
       }
 
       @Override
@@ -600,56 +715,11 @@ abstract class PoolBase
       {
          tracker.close();
       }
-
-      void recordConnectionUsage(final PoolEntry poolEntry)
-      {
-         tracker.recordConnectionUsageMillis(poolEntry.getMillisSinceBorrowed());
-      }
-
-      /**
-       * @param poolEntry
-       * @param now
-       */
-      void recordBorrowStats(final PoolEntry poolEntry, final long startTime)
-      {
-         final long now = ClockSource.INSTANCE.currentTime();
-         poolEntry.lastBorrowed = now;
-         tracker.recordConnectionAcquiredNanos(ClockSource.INSTANCE.elapsedNanos(startTime, now));
-      }
-
-      void recordConnectionTimeout() {
-         tracker.recordConnectionTimeout();
-      }
    }
 
    /**
-    * A no-op implementation of the MetricsTrackerDelegate that is used when metrics capture is
+    * A no-op implementation of the IMetricsTrackerDelegate that is used when metrics capture is
     * disabled.
     */
-   static final class NopMetricsTrackerDelegate extends MetricsTrackerDelegate
-   {
-      @Override
-      void recordConnectionUsage(final PoolEntry poolEntry)
-      {
-         // no-op
-      }
-
-      @Override
-      public void close()
-      {
-         // no-op
-      }
-
-      @Override
-      void recordBorrowStats(final PoolEntry poolEntry, final long startTime)
-      {
-         // no-op
-      }
-
-      @Override
-      void recordConnectionTimeout()
-      {
-         // no-op
-      }
-   }
+   static final class NopMetricsTrackerDelegate implements IMetricsTrackerDelegate {}
 }

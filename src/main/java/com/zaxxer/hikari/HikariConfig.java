@@ -16,6 +16,10 @@
 
 package com.zaxxer.hikari;
 
+import static com.zaxxer.hikari.util.UtilityElf.getNullIfEmpty;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -25,6 +29,7 @@ import java.lang.reflect.Modifier;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
 
@@ -37,11 +42,7 @@ import com.codahale.metrics.health.HealthCheckRegistry;
 import com.zaxxer.hikari.metrics.MetricsTrackerFactory;
 import com.zaxxer.hikari.util.PropertyElf;
 
-import static java.util.concurrent.TimeUnit.MINUTES;
-import static java.util.concurrent.TimeUnit.SECONDS;
-
-import static com.zaxxer.hikari.util.UtilityElf.getNullIfEmpty;
-
+@SuppressWarnings({"SameParameterValue", "unused"})
 public class HikariConfig implements HikariConfigMXBean
 {
    private static final Logger LOGGER = LoggerFactory.getLogger(HikariConfig.class);
@@ -52,7 +53,7 @@ public class HikariConfig implements HikariConfigMXBean
    private static final long MAX_LIFETIME = MINUTES.toMillis(30);
    private static final int DEFAULT_POOL_SIZE = 10;
 
-   private static boolean unitTest;
+   private static boolean unitTest = false;
 
    // Properties changeable at runtime through the MBean
    //
@@ -66,6 +67,7 @@ public class HikariConfig implements HikariConfigMXBean
 
    // Properties NOT changeable at runtime
    //
+   private long initializationFailTimeout;
    private String catalog;
    private String connectionInitSql;
    private String connectionTestQuery;
@@ -79,14 +81,13 @@ public class HikariConfig implements HikariConfigMXBean
    private String username;
    private boolean isAutoCommit;
    private boolean isReadOnly;
-   private boolean isInitializationFailFast;
    private boolean isIsolateInternalQueries;
    private boolean isRegisterMbeans;
    private boolean isAllowPoolSuspension;
    private DataSource dataSource;
    private Properties dataSourceProperties;
    private ThreadFactory threadFactory;
-   private ScheduledThreadPoolExecutor scheduledExecutor;
+   private ScheduledExecutorService scheduledExecutor;
    private MetricsTrackerFactory metricsTrackerFactory;
    private Object metricRegistry;
    private Object healthCheckRegistry;
@@ -106,9 +107,8 @@ public class HikariConfig implements HikariConfigMXBean
       connectionTimeout = CONNECTION_TIMEOUT;
       validationTimeout = VALIDATION_TIMEOUT;
       idleTimeout = IDLE_TIMEOUT;
-
+      initializationFailTimeout = 1;
       isAutoCommit = true;
-      isInitializationFailFast = true;
 
       String systemProp = System.getProperty("hikaricp.configurationFile");
       if (systemProp != null) {
@@ -174,8 +174,7 @@ public class HikariConfig implements HikariConfigMXBean
    /**
     * Set the SQL query to be executed to test the validity of connections. Using
     * the JDBC4 <code>Connection.isValid()</code> method to test connection validity can
-    * be more efficient on some databases and is recommended.  See
-    * {@link HikariConfig#setJdbc4ConnectionTest(boolean)}.
+    * be more efficient on some databases and is recommended.
     *
     * @param connectionTestQuery a SQL query string
     */
@@ -396,14 +395,66 @@ public class HikariConfig implements HikariConfigMXBean
    }
 
    /**
+    * Get the pool initialization failure timeout.  See {@code #setInitializationFailTimeout(long)}
+    * for details.
+    *
+    * @return the number of milliseconds before the pool initialization fails
+    * @see HikariConfig#setInitializationFailTimeout(long)
+    */
+   public long getInitializationFailTimeout()
+   {
+      return initializationFailTimeout;
+   }
+
+   /**
+    * Set the pool initialization failure timeout.  This setting applies to pool
+    * initialization when {@link HikariDataSource} is constructed with a {@link HikariConfig},
+    * or when {@link HikariDataSource} is constructed using the no-arg constructor
+    * and {@link HikariDataSource#getConnection()} is called.
+    * <ul>
+    *   <li>Any value greater than zero will be treated as a timeout for pool initialization.
+    *       The calling thread will be blocked from continuing until a successful connection
+    *       to the database, or until the timeout is reached.  If the timeout is reached, then
+    *       a {@code PoolInitializationException} will be thrown. </li>
+    *   <li>A value of zero will <i>not</i>  prevent the pool from starting in the
+    *       case that a connection cannot be obtained. However, upon start the pool will
+    *       attempt to obtain a connection and validate that the {@code connectionTestQuery}
+    *       and {@code connectionInitSql} are valid.  If those validations fail, an exception
+    *       will be thrown.  If a connection cannot be obtained, the validation is skipped
+    *       and the the pool will start and continue to try to obtain connections in the
+    *       background.  This can mean that callers to {@code DataSource#getConnection()} may
+    *       encounter exceptions. </li>
+    *   <li>A value less than zero will <i>not</i> bypass any connection attempt and
+    *       validation during startup, and therefore the pool will start immediately.  The
+    *       pool will continue to try to obtain connections in the background. This can mean
+    *       that callers to {@code DataSource#getConnection()} may encounter exceptions. </li>
+    * </ul>
+    * Note that if this timeout value is greater than or equal to zero (0), and therefore an
+    * initial connection validation is performed, this timeout does not override the
+    * {@code connectionTimeout} or {@code validationTimeout}; they will be honored before this
+    * timeout is applied.  The default value is one millisecond.
+    *
+    * @param initializationFailTimeout the number of milliseconds before the
+    *        pool initialization fails, or 0 to validate connection setup but continue with
+    *        pool start, or less than zero to skip all initialization checks and start the
+    *        pool without delay.
+    */
+   public void setInitializationFailTimeout(long initializationFailTimeout)
+   {
+      this.initializationFailTimeout = initializationFailTimeout;
+   }
+
+   /**
     * Get whether or not the construction of the pool should throw an exception
     * if the minimum number of connections cannot be created.
     *
     * @return whether or not initialization should fail on error immediately
+    * @deprecated
     */
+   @Deprecated
    public boolean isInitializationFailFast()
    {
-      return isInitializationFailFast;
+      return initializationFailTimeout > 0;
    }
 
    /**
@@ -411,10 +462,14 @@ public class HikariConfig implements HikariConfigMXBean
     * if the minimum number of connections cannot be created.
     *
     * @param failFast true if the pool should fail if the minimum connections cannot be created
+    * @deprecated
     */
+   @Deprecated
    public void setInitializationFailFast(boolean failFast)
    {
-      isInitializationFailFast = failFast;
+      LOGGER.warn("The initializationFailFast propery is deprecated, see initializationFailTimeout");
+
+      initializationFailTimeout = (failFast ? 1 : -1);
    }
 
    public boolean isIsolateInternalQueries()
@@ -475,15 +530,7 @@ public class HikariConfig implements HikariConfigMXBean
       }
 
       if (metricRegistry != null) {
-         if (metricRegistry instanceof String) {
-            try {
-               InitialContext initCtx = new InitialContext();
-               metricRegistry = initCtx.lookup((String) metricRegistry);
-            }
-            catch (NamingException e) {
-               throw new IllegalArgumentException(e);
-            }
-         }
+         metricRegistry = getObjectOrPerformJndiLookup(metricRegistry);
 
          if (!(metricRegistry instanceof MetricRegistry)) {
             throw new IllegalArgumentException("Class must be an instance of com.codahale.metrics.MetricRegistry");
@@ -491,6 +538,20 @@ public class HikariConfig implements HikariConfigMXBean
       }
 
       this.metricRegistry = metricRegistry;
+   }
+
+   private Object getObjectOrPerformJndiLookup(Object object)
+   {
+      if (object instanceof String) {
+         try {
+            InitialContext initCtx = new InitialContext();
+            return initCtx.lookup((String) object);
+         }
+         catch (NamingException e) {
+            throw new IllegalArgumentException(e);
+         }
+      }
+      return object;
    }
 
    /**
@@ -511,15 +572,7 @@ public class HikariConfig implements HikariConfigMXBean
    public void setHealthCheckRegistry(Object healthCheckRegistry)
    {
       if (healthCheckRegistry != null) {
-         if (healthCheckRegistry instanceof String) {
-            try {
-               InitialContext initCtx = new InitialContext();
-               healthCheckRegistry = initCtx.lookup((String) healthCheckRegistry);
-            }
-            catch (NamingException e) {
-               throw new IllegalArgumentException(e);
-            }
-         }
+         healthCheckRegistry = getObjectOrPerformJndiLookup(healthCheckRegistry);
 
          if (!(healthCheckRegistry instanceof HealthCheckRegistry)) {
             throw new IllegalArgumentException("Class must be an instance of com.codahale.metrics.health.HealthCheckRegistry");
@@ -668,7 +721,29 @@ public class HikariConfig implements HikariConfigMXBean
     *
     * @return the executor
     */
+   @Deprecated
    public ScheduledThreadPoolExecutor getScheduledExecutorService()
+   {
+      return (ScheduledThreadPoolExecutor) scheduledExecutor;
+   }
+
+   /**
+    * Set the ScheduledExecutorService used for housekeeping.
+    *
+    * @param executor the ScheduledExecutorService
+    */
+   @Deprecated
+   public void setScheduledExecutorService(ScheduledThreadPoolExecutor executor)
+   {
+      this.scheduledExecutor = executor;
+   }
+
+   /**
+    * Get the ScheduledExecutorService used for housekeeping.
+    *
+    * @return the executor
+    */
+   public ScheduledExecutorService getScheduledExecutor()
    {
       return scheduledExecutor;
    }
@@ -678,7 +753,7 @@ public class HikariConfig implements HikariConfigMXBean
     *
     * @param executor the ScheduledExecutorService
     */
-   public void setScheduledExecutorService(ScheduledThreadPoolExecutor executor)
+   public void setScheduledExecutor(ScheduledExecutorService executor)
    {
       this.scheduledExecutor = executor;
    }
@@ -741,6 +816,7 @@ public class HikariConfig implements HikariConfigMXBean
       this.threadFactory = threadFactory;
    }
 
+   @SuppressWarnings("StatementWithEmptyBody")
    public void validate()
    {
       if (poolName == null) {
@@ -769,13 +845,16 @@ public class HikariConfig implements HikariConfigMXBean
       else if (dataSourceClassName != null) {
          if (driverClassName != null) {
             LOGGER.error("{} - cannot use driverClassName and dataSourceClassName together.", poolName);
-            throw new IllegalArgumentException("cannot use driverClassName and dataSourceClassName together.");
+            // NOTE: This exception text is referenced by a Spring Boot FailureAnalyzer, it should not be
+            // changed without first notifying the Spring Boot developers.
+            throw new IllegalStateException("cannot use driverClassName and dataSourceClassName together.");
          }
          else if (jdbcUrl != null) {
             LOGGER.warn("{} - using dataSourceClassName and ignoring jdbcUrl.", poolName);
          }
       }
-      else if (jdbcUrl != null) {
+      else if (jdbcUrl != null || dataSourceJndiName != null) {
+         // ok
       }
       else if (driverClassName != null) {
          LOGGER.error("{} - jdbcUrl is required with driverClassName.", poolName);
@@ -836,6 +915,7 @@ public class HikariConfig implements HikariConfigMXBean
       }
    }
 
+   @SuppressWarnings("StatementWithEmptyBody")
    private void logConfiguration()
    {
       LOGGER.debug("{} - configuration:", poolName);
@@ -848,21 +928,34 @@ public class HikariConfig implements HikariConfigMXBean
                dsProps.setProperty("password", "<masked>");
                value = dsProps;
             }
-            if (prop.contains("password")) {
+
+            if ("initializationFailTimeout".equals(prop) && initializationFailTimeout == Long.MAX_VALUE) {
+               value = "infinite";
+            }
+            else if ("transactionIsolation".equals(prop) && transactionIsolationName == null) {
+               value = "default";
+            }
+            else if (prop.matches("scheduledExecutorService|threadFactory") && value == null) {
+               value = "internal";
+            }
+            else if (prop.contains("password")) {
                value = "<masked>";
             }
             else if (value instanceof String) {
                value = "\"" + value + "\""; // quote to see lead/trailing spaces is any
             }
+            else if (value == null) {
+               value = "none";
+            }
             LOGGER.debug((prop + "................................................").substring(0, 32) + value);
          }
          catch (Exception e) {
-            continue;
+            // continue
          }
       }
    }
 
-   protected void loadProperties(String propertyFileName)
+   private void loadProperties(String propertyFileName)
    {
       final File propFile = new File(propertyFileName);
       try (final InputStream is = propFile.isFile() ? new FileInputStream(propFile) : this.getClass().getResourceAsStream(propertyFileName)) {
